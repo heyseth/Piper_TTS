@@ -418,6 +418,33 @@ async function removeVoice(context: vscode.ExtensionContext) {
     }
 }
 
+// ponytail: xclip/wl-paste/pbpaste/clip.exe — the only reliable way to read terminal selections (VS Code's clipboard API ≠ system clipboard)
+async function readSystemClipboard(): Promise<string | undefined> {
+    const cmds = os.platform() === 'darwin'
+        ? [{ command: 'pbpaste', args: [] }]
+        : os.platform() === 'win32'
+            ? [{ command: 'powershell', args: ['-NoProfile', '-Command', 'Get-Clipboard'] }]
+            : [
+                { command: 'xclip', args: ['-selection', 'clipboard', '-out'] },
+                { command: 'wl-paste', args: ['-no-newline'] }, // ponytail: Wayland fallback
+            ];
+
+    for (const cmd of cmds) {
+        let out = '';
+        const result = await new Promise<string | undefined>((resolve) => {
+            try {
+                const proc = spawn(cmd.command, cmd.args);
+                proc.stdout.on('data', (d: Buffer) => out += d.toString());
+                proc.on('close', (code) => resolve(code === 0 ? out.trim() : undefined));
+                proc.on('error', () => resolve(undefined));
+            } catch {
+                resolve(undefined);
+            }
+        });
+        if (result !== undefined) return result;
+    }
+}
+
 // API interface that will be exposed to other extensions
 export interface PiperTTSApi {
     readText(text: string): Promise<void>;
@@ -593,16 +620,23 @@ export function activate(context: vscode.ExtensionContext): PiperTTSApi {
     context.subscriptions.push(selectVoiceDisposable);
 
     const readAloudDisposable = vscode.commands.registerCommand('piper-tts.readAloud', async () => {
+        let text: string | undefined;
+
+        // Try editor selection first
         const editor = vscode.window.activeTextEditor;
-        if (!editor) {
-            return;
+        if (editor) {
+            text = editor.document.getText(editor.selection);
         }
 
-        const selection = editor.selection;
-        const text = editor.document.getText(selection);
+        // Fallback: copy terminal selection, then read system clipboard
+        if (!text?.trim() && vscode.window.activeTerminal) {
+            await vscode.commands.executeCommand('workbench.action.terminal.copySelection');
+            await new Promise(r => setTimeout(r, 100)); // ponytail: lets copy propagate to system clipboard
+            text = await readSystemClipboard();
+        }
 
-        if (!text) {
-            vscode.window.showInformationMessage('Please select some text to read aloud');
+        if (!text?.trim()) {
+            vscode.window.showInformationMessage('Please select some text to read aloud (copy terminal text first)');
             return;
         }
 

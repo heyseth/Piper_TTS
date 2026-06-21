@@ -5,11 +5,19 @@ A Visual Studio Code extension that adds high-quality local text-to-speech capab
 ## Features
 
 - **Read Selected Text Aloud**: Easily convert selected text to speech with a single command
+- **Terminal Selection Support**: Select text in the integrated terminal and read it aloud via right-click context menu
 - **Multiple Languages and Voices**: Support for 40+ languages with 100+ voice options
 - **Local Processing**: All text-to-speech processing happens locally on your machine, with no data sent to external servers
 - **Cross-Platform**: Works on Windows and Linux
 - **Voice Management**: Download additional voices or remove existing ones
 - **API for Other Extensions**: Can be used by other VS Code extensions
+
+## Prerequisites
+
+### Linux
+Install a clipboard utility to read terminal selections:
+- **X11:** `sudo apt install xclip` (Debian/Ubuntu) or `sudo dnf install xclip` (Fedora)
+- **Wayland:** `sudo apt install wl-clipboard` (Debian/Ubuntu) or `sudo dnf install wl-clipboard` (Fedora)
 
 ## Installation
 
@@ -22,9 +30,15 @@ A Visual Studio Code extension that adds high-quality local text-to-speech capab
 
 ### Reading Text Aloud
 
+#### From Editor
 1. Select text in the editor
 2. Right-click and select "Read Aloud Text" from the context menu, or:
 3. Open the Command Palette (`Ctrl+Shift+P` / `Cmd+Shift+P`) and run "Piper TTS: Read Aloud Text"
+
+#### From Integrated Terminal
+1. Select text in the terminal (click and drag)
+2. Right-click and select "Read Aloud Text" from the context menu, or:
+3. Open the Command Palette and run "Piper TTS: Read Aloud Text"
 
 ### Stopping Playback
 
