@@ -19,6 +19,7 @@
   ],
   "activationEvents": [
     "onCommand:piper-tts.readAloud",
+    "onCommand:piper-tts.readAloudPreview",
     "onCommand:piper-tts.stopPlayback",
     "onCommand:piper-tts.selectVoice",
     "onCommand:piper-tts.downloadVoice",
@@ -46,6 +47,11 @@
       {
         "command": "piper-tts.readAloud",
         "title": "Read Aloud Text",
+        "category": "Piper TTS"
+      },
+      {
+        "command": "piper-tts.readAloudPreview",
+        "title": "Read Aloud Selection (Markdown Preview)",
         "category": "Piper TTS"
       },
       {
@@ -87,6 +93,10 @@
           "when": "editorHasSelection"
         },
         {
+          "command": "piper-tts.readAloudPreview",
+          "when": "activeCustomEditorId == 'vscode.markdown.preview.editor' || activeWebviewPanelId == 'vscode.markdown.preview.editor' || markdownPreviewFocus"
+        },
+        {
           "command": "piper-tts.stopPlayback"
         },
         {
@@ -99,7 +109,27 @@
           "command": "piper-tts.removeVoice"
         }
       ]
-    }
+    },
+    "keybindings": [
+      {
+        "command": "piper-tts.readAloud",
+        "key": "alt+a",
+        "when": "editorTextFocus && editorHasSelection"
+      },
+      {
+        "command": "piper-tts.readAloudPreview",
+        "key": "alt+a",
+        "when": "activeCustomEditorId == 'vscode.markdown.preview.editor' || activeWebviewPanelId == 'vscode.markdown.preview.editor' || markdownPreviewFocus"
+      },
+      {
+        "command": "piper-tts.stopPlayback",
+        "key": "alt+shift+a",
+        "when": "editorTextFocus || markdownPreviewFocus"
+      }
+    ],
+    "markdown.previewScripts": [
+      "./media/copySelection.js"
+    ]
   },
   "scripts": {
     "vscode:prepublish": "npm run compile",
