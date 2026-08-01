@@ -40,6 +40,13 @@ function getSpeed(): number {
     return clampSpeed(vscode.workspace.getConfiguration('piper-tts').get<number>('speed') ?? 1);
 }
 
+// Context key reflecting whether audio is actively playing, so menus (e.g. "Stop
+// Reading") can be shown only while something is being read.
+const PLAYING_CONTEXT = 'piper-tts.isPlaying';
+function setPlayingContext(playing: boolean): void {
+    void vscode.commands.executeCommand('setContext', PLAYING_CONTEXT, playing);
+}
+
 function showSpeedIndicator(speed: number): void {
     if (!speedStatusBarItem) {
         return;
@@ -63,16 +70,25 @@ function speedCommandId(value: number): string {
 
 // Set the playback speed to `next` (clamped). The value is persisted to user settings
 // (remembered across sessions) and shown in the status bar. If something is currently
-// playing, the remaining text is re-synthesized at the new speed so the change takes
-// effect immediately.
+// playing, the change takes effect immediately:
+//   - On Windows (seamless mode) the player is restarted from the current position with
+//     a new sox `tempo` — no Piper reload, so it is effectively gapless.
+//   - Elsewhere the remaining text is re-synthesized at the new speed.
 async function applySpeed(next: number): Promise<void> {
     const current = getSpeed();
     next = clampSpeed(next);
 
-    // Work out the not-yet-spoken text before we change the setting, using the old
-    // speed to estimate how far playback has reached.
-    let remaining: string | undefined;
-    if (currentContext && currentUtterance && playerProcess && next !== current) {
+    // Persist the new speed first, so any re-synthesis below picks it up via getSpeed().
+    await vscode.workspace.getConfiguration('piper-tts').update('speed', next, vscode.ConfigurationTarget.Global);
+    showSpeedIndicator(next);
+    if (next === current) { return; }
+
+    // Windows: apply seamlessly (or re-synthesize the remainder if still synthesizing).
+    if (seamlessSpeedChange(next)) { return; }
+
+    // Other platforms: re-synthesize the not-yet-spoken text (estimated from the old
+    // speed) at the new speed so the change takes effect immediately.
+    if (!IS_WINDOWS && currentContext && currentUtterance && playerProcess) {
         const utterance = currentUtterance;
         const elapsedSeconds = (Date.now() - utterance.startTime) / 1000;
         const spokenChars = Math.floor(elapsedSeconds * BASE_CHARS_PER_SEC * current);
@@ -84,15 +100,8 @@ async function applySpeed(next: number): Promise<void> {
         }
         const rest = utterance.text.slice(offset);
         if (rest.trim()) {
-            remaining = rest;
+            synthesizeAndPlay(currentContext, rest, { immediate: true }).catch(error => console.error('Failed to restart playback at new speed:', error));
         }
-    }
-
-    await vscode.workspace.getConfiguration('piper-tts').update('speed', next, vscode.ConfigurationTarget.Global);
-    showSpeedIndicator(next);
-
-    if (remaining !== undefined && currentContext) {
-        synthesizeAndPlay(currentContext, remaining).catch(error => console.error('Failed to restart playback at new speed:', error));
     }
 }
 
@@ -100,6 +109,182 @@ async function applySpeed(next: number): Promise<void> {
 // clean (…, 0.75, 1, 1.25, …) and clamped to [SPEED_MIN, SPEED_MAX].
 async function adjustSpeed(delta: number): Promise<void> {
     await applySpeed(Math.round((getSpeed() + delta) / SPEED_STEP) * SPEED_STEP);
+}
+
+// ---- Seamless speed (Windows) ----
+// Piper reloads its model on every spawn (a multi-second cost), so re-synthesizing on
+// each speed change is never gapless. On Windows the bundled sox `play.exe` supports the
+// pitch-preserving `tempo` effect and `trim`. So we stream Piper's output to the player
+// (for an instant start) while also teeing the raw audio to a file; once that file is
+// complete, a speed change restarts only the player from the current offset with a new
+// tempo — gapless, no Piper reload. If the speed is changed before synthesis finishes,
+// we fall back to re-synthesizing the remainder (the previous behaviour). Other platforms
+// (aplay/afplay) lack these effects and always use the re-synthesis path.
+const IS_WINDOWS = os.platform() === 'win32';
+const RAW_SAMPLE_RATE = 22050;
+const RAW_BYTES_PER_SEC = RAW_SAMPLE_RATE * 2; // 16-bit mono
+
+let currentPlayback: {
+    token: object;
+    file: string;
+    text: string;            // full text, so an early speed change can re-synthesize
+    durationSec: number;     // known once synthesis (the temp file) completes
+    synthComplete: boolean;  // temp file fully written — safe to seek for tempo changes
+    originOffsetSec: number; // offset (in the 1x file) where the current player started
+    startWall: number;       // Date.now() when the current player started
+    tempo: number;           // current playback tempo (= speed)
+} | undefined;
+
+function cleanupPlaybackFile(): void {
+    const file = currentPlayback?.file;
+    if (file) {
+        try { fs.unlinkSync(file); } catch { /* ignore */ }
+    }
+}
+
+// Mark this playback finished — unless a newer one has already superseded it (a speed
+// change reuses the same file under a new token).
+function finalizeSeamless(token: object): void {
+    if (currentPlayback && currentPlayback.token === token) {
+        cleanupPlaybackFile();
+        currentPlayback = undefined;
+        setPlayingContext(false);
+    }
+}
+
+function soxPlayPath(context: vscode.ExtensionContext): string {
+    return path.join(path.resolve(context.extensionUri.fsPath, ''), 'sox', 'play.exe');
+}
+
+// Player that reads a completed raw file, seeking to `offsetSec` and applying `tempo`.
+function spawnSoxFilePlayer(context: vscode.ExtensionContext, file: string, offsetSec: number, tempo: number) {
+    return spawn(soxPlayPath(context), [
+        '-t', 'raw', '-r', String(RAW_SAMPLE_RATE), '-b', '16', '-e', 'signed', '-c', '1', '-L',
+        file,
+        'trim', Math.max(0, offsetSec).toFixed(3),
+        'tempo', tempo.toFixed(3),
+        'remix', '1'
+    ]);
+}
+
+// Player that reads raw audio from stdin (streamed from Piper) applying `tempo`.
+function spawnSoxStreamPlayer(context: vscode.ExtensionContext, tempo: number) {
+    return spawn(soxPlayPath(context), [
+        '-t', 'raw', '-r', String(RAW_SAMPLE_RATE), '-b', '16', '-e', 'signed', '-c', '1', '-L',
+        '-',
+        'tempo', tempo.toFixed(3),
+        'remix', '1'
+    ]);
+}
+
+function attachSeamlessHandlers(player: ReturnType<typeof spawn>, token: object, resolve?: () => void, reject?: (e: Error) => void): void {
+    player.on('error', (error) => {
+        console.error('Playback error:', error);
+        finalizeSeamless(token);
+        if (reject) { reject(error); }
+    });
+    player.on('close', (code) => {
+        if (playerProcess === player) {
+            playerProcess = undefined;
+        }
+        finalizeSeamless(token);
+        if (code === 0 || code === null) {
+            if (resolve) { resolve(); }
+        } else if (reject) {
+            reject(new Error(`Player process exited with code: ${code}`));
+        }
+    });
+}
+
+// Windows seamless playback: stream Piper -> player for an instant start, while teeing
+// the raw audio to a temp file so later speed changes can re-time it without re-synth.
+async function synthesizeAndPlaySeamless(context: vscode.ExtensionContext, text: string): Promise<void> {
+    if (!text) { throw new Error('No text provided'); }
+
+    // Stop and clear any previous playback (and remove its temp file).
+    stopCurrentPlayback();
+    cleanupPlaybackFile();
+    currentPlayback = undefined;
+
+    const piperPath = getPiperPath(context);
+    const voicePath = getVoicePath(context);
+    if (!fs.existsSync(piperPath)) { throw new Error(`Piper executable not found at: ${piperPath}`); }
+    if (!fs.existsSync(voicePath)) { throw new Error(`Voice model not found at: ${voicePath}`); }
+
+    const file = path.join(os.tmpdir(), `piper-tts-${Date.now()}-${Math.random().toString(36).slice(2)}.raw`);
+    const tempo = getSpeed();
+    const token = {};
+
+    // Synthesize at normal length scale (1.0); speed is applied by the player's tempo.
+    const piper = spawn(piperPath, ['--model', voicePath, '--output-raw', '--length_scale', '1.000'], {
+        cwd: path.dirname(piperPath),
+        env: { ...process.env },
+        windowsHide: false
+    });
+    piperProcess = piper;
+    const player = spawnSoxStreamPlayer(context, tempo);
+    playerProcess = player;
+
+    const out = fs.createWriteStream(file);
+    piper.stdout.pipe(out);           // tee to file for seamless re-timing
+    piper.stdout.pipe(player.stdin);  // stream to the player for an instant start
+    piper.stderr.on('data', (d) => console.error('Piper error output:', d.toString()));
+
+    currentPlayback = { token, file, text, durationSec: 0, synthComplete: false, originOffsetSec: 0, startWall: Date.now(), tempo };
+    setPlayingContext(true);
+
+    // When the temp file is fully written, mark synthesis complete and record duration.
+    out.on('finish', () => {
+        if (currentPlayback && currentPlayback.token === token) {
+            currentPlayback.synthComplete = true;
+            try { currentPlayback.durationSec = fs.statSync(file).size / RAW_BYTES_PER_SEC; } catch { /* ignore */ }
+        }
+    });
+
+    piper.stdin.write(text);
+    piper.stdin.end();
+
+    return await new Promise<void>((resolve, reject) => {
+        piper.on('error', (e) => { if (piperProcess === piper) { piperProcess = undefined; } finalizeSeamless(token); reject(e); });
+        piper.on('close', () => { if (piperProcess === piper) { piperProcess = undefined; } });
+        attachSeamlessHandlers(player, token, resolve, reject);
+    });
+}
+
+// Apply a speed change to the current (Windows) playback. Returns true if it handled the
+// change. Config must already be updated to `next` (a re-synth reads it via getSpeed()).
+function seamlessSpeedChange(next: number): boolean {
+    if (!IS_WINDOWS || !currentContext || !currentPlayback || !playerProcess) { return false; }
+    const pb = currentPlayback;
+    const elapsedSeconds = (Date.now() - pb.startWall) / 1000;
+
+    if (pb.synthComplete) {
+        // Gapless: restart only the player from the current offset with the new tempo.
+        const offset = pb.originOffsetSec + elapsedSeconds * pb.tempo;
+        if (offset >= pb.durationSec - 0.05) { return false; } // practically finished
+        const token = {};
+        // Reassign the tracked playback first, so the outgoing player's close handler
+        // (fired by stopCurrentPlayback below) does not delete the shared temp file.
+        currentPlayback = { ...pb, token, originOffsetSec: Math.max(0, offset), startWall: Date.now(), tempo: next };
+        stopCurrentPlayback(); // kills the player only; the temp file is reused
+        const player = spawnSoxFilePlayer(currentContext, pb.file, Math.max(0, offset), next);
+        playerProcess = player;
+        setPlayingContext(true);
+        attachSeamlessHandlers(player, token);
+        return true;
+    }
+
+    // Still synthesizing (temp file incomplete, can't seek it): re-synthesize the
+    // remaining text at the new speed. Estimate the position from characters.
+    const spokenChars = Math.floor(elapsedSeconds * BASE_CHARS_PER_SEC * pb.tempo);
+    let charOffset = Math.min(pb.text.length, Math.max(0, spokenChars));
+    const nextSpace = pb.text.indexOf(' ', charOffset);
+    if (nextSpace !== -1) { charOffset = nextSpace + 1; }
+    const rest = pb.text.slice(charOffset);
+    if (rest.trim()) {
+        synthesizeAndPlaySeamless(currentContext, rest).catch(e => console.error('Failed to restart playback at new speed:', e));
+    }
+    return true;
 }
 
 function getAvailableVoices(context: vscode.ExtensionContext): string[] {
@@ -513,7 +698,7 @@ async function removeVoice(context: vscode.ExtensionContext) {
 // Synthesize `text` with Piper at the current speed and stream it to the audio
 // player. Tracks the utterance so the speed can be changed mid-playback (see
 // adjustSpeed). Resolves when playback finishes (or is stopped/superseded).
-async function synthesizeAndPlay(context: vscode.ExtensionContext, text: string): Promise<void> {
+async function synthesizeAndPlay(context: vscode.ExtensionContext, text: string, options?: { immediate?: boolean }): Promise<void> {
     try {
         if (!text) {
             throw new Error('No text provided');
@@ -522,8 +707,12 @@ async function synthesizeAndPlay(context: vscode.ExtensionContext, text: string)
         // Stop any current playback
         stopCurrentPlayback();
 
-        // Small delay to ensure any file operations are complete
-        await new Promise(resolve => setTimeout(resolve, 100));
+        // Small delay to ensure any file operations are complete. Skipped when
+        // restarting for a speed change (options.immediate) to keep the change as
+        // seamless as possible — nothing new is being written to disk in that case.
+        if (!options?.immediate) {
+            await new Promise(resolve => setTimeout(resolve, 100));
+        }
 
         const piperPath = getPiperPath(context);
         const voicePath = getVoicePath(context);
@@ -567,6 +756,16 @@ async function synthesizeAndPlay(context: vscode.ExtensionContext, text: string)
         // Track this utterance so a speed change can resume the remainder in real time.
         const token = {};
         currentUtterance = { text, startTime: Date.now(), token };
+        setPlayingContext(true);
+
+        // Mark playback as finished for this utterance (unless it has already been
+        // superseded by a newer one, e.g. via a speed change).
+        const finalizeIfCurrent = () => {
+            if (currentUtterance && currentUtterance.token === token) {
+                currentUtterance = undefined;
+                setPlayingContext(false);
+            }
+        };
 
         piper.stderr.on('data', (data) => {
             console.error('Piper error output:', data.toString());
@@ -585,19 +784,27 @@ async function synthesizeAndPlay(context: vscode.ExtensionContext, text: string)
         return await new Promise<void>((resolve, reject) => {
             piper.on('error', (error) => {
                 console.error('Piper error:', error);
+                finalizeIfCurrent();
                 reject(error);
             });
 
             player.on('error', (error) => {
                 console.error('Playback error:', error);
+                finalizeIfCurrent();
                 reject(error);
             });
 
-            // Clean up processes
+            // Clean up processes. Only clear the module-level reference if it still
+            // points at *this* process — a speed change spawns a new piper/player, and
+            // the old (killed) one's close event fires later; without this guard it
+            // would wipe out the reference to the new, still-playing process.
             piper.on('close', (code) => {
-                piperProcess = undefined;
+                if (piperProcess === piper) {
+                    piperProcess = undefined;
+                }
                 // Only reject if the process wasn't killed intentionally
                 if (code !== 0 && code !== null) {
+                    finalizeIfCurrent();
                     reject(new Error(`Piper process exited with code: ${code}`));
                 } else {
                     resolve();
@@ -605,12 +812,12 @@ async function synthesizeAndPlay(context: vscode.ExtensionContext, text: string)
             });
 
             player.on('close', (code) => {
-                playerProcess = undefined;
+                if (playerProcess === player) {
+                    playerProcess = undefined;
+                }
                 // Clear the tracked utterance only if it is still this one (a speed
                 // change starts a new utterance and supersedes the old one).
-                if (currentUtterance && currentUtterance.token === token) {
-                    currentUtterance = undefined;
-                }
+                finalizeIfCurrent();
                 // code === null means the process was killed intentionally (stop, or a
                 // speed change restarting playback) — treat that as a normal end.
                 if (code === 0 || code === null) {
@@ -680,9 +887,12 @@ export function activate(context: vscode.ExtensionContext): PiperTTSApi {
 
     // Create the API implementation
     const api: PiperTTSApi = {
-        readText: (text: string) => synthesizeAndPlay(context, text),
+        readText: (text: string) => IS_WINDOWS ? synthesizeAndPlaySeamless(context, text) : synthesizeAndPlay(context, text),
         stopPlayback: () => {
             currentUtterance = undefined;
+            cleanupPlaybackFile();
+            currentPlayback = undefined;
+            setPlayingContext(false);
             stopCurrentPlayback();
         },
         selectVoice: () => selectVoice(context),
@@ -766,4 +976,5 @@ export function getApi(): PiperTTSApi | undefined {
 
 export function deactivate() {
     stopCurrentPlayback();
+    cleanupPlaybackFile();
 }

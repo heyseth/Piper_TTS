@@ -41,10 +41,12 @@ faster, lower = slower), or adjust it on the fly:
 - Or pick a preset from the **Reading Speed** submenu in the editor right-click menu
 - Or run "Piper TTS: Increase Speed" / "Piper TTS: Decrease Speed" from the Command Palette
 
-The new speed is shown briefly in the status bar. If something is already playing, the
-change takes effect immediately — the rest of the current text is re-spoken at the new
-speed. The setting is remembered across sessions. Speed is clamped to the 0.5–3.0 range
-in 0.25 steps.
+The new speed is shown briefly in the status bar, is remembered across sessions, and is
+clamped to the 0.5–3.0 range in 0.25 steps. If something is already playing, the change
+takes effect immediately. On Windows this is gapless — the already-synthesized audio is
+re-timed with a pitch-preserving tempo effect rather than regenerated — so you can scrub
+the speed up and down while listening. (On other platforms the remaining text is
+re-synthesized at the new speed.)
 
 ### Changing Voices
 

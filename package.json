@@ -142,7 +142,8 @@
         },
         {
           "command": "piper-tts.stopPlayback",
-          "group": "1_modification"
+          "group": "1_modification",
+          "when": "piper-tts.isPlaying"
         },
         {
           "submenu": "piper-tts.speedSubmenu",
@@ -155,7 +156,8 @@
           "when": "editorHasSelection"
         },
         {
-          "command": "piper-tts.stopPlayback"
+          "command": "piper-tts.stopPlayback",
+          "when": "piper-tts.isPlaying"
         },
         {
           "command": "piper-tts.selectVoice"
