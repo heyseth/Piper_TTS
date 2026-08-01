@@ -10,6 +10,98 @@ import { fixSymlinks } from './symlinkUtils';
 let piperProcess: ReturnType<typeof spawn> | undefined;
 let playerProcess: ReturnType<typeof spawn> | undefined;
 
+// Playback speed bounds. Speed is a multiplier (1 = normal, higher = faster) and
+// maps to Piper's --length_scale as length_scale = 1 / speed.
+const SPEED_MIN = 0.5;
+const SPEED_MAX = 3;
+const SPEED_STEP = 0.25;
+
+// Rough speaking rate at speed 1.0 for the bundled voices, used only to estimate how
+// far playback has progressed when the speed is changed mid-utterance.
+const BASE_CHARS_PER_SEC = 14;
+
+// The extension context and the utterance currently being spoken, tracked so a speed
+// change can re-synthesize the remaining text in real time.
+let currentContext: vscode.ExtensionContext | undefined;
+let currentUtterance: { text: string; startTime: number; token: object } | undefined;
+
+// Status bar indicator shown briefly when the speed changes.
+let speedStatusBarItem: vscode.StatusBarItem | undefined;
+let speedIndicatorTimer: ReturnType<typeof setTimeout> | undefined;
+
+function clampSpeed(value: number): number {
+    if (typeof value !== 'number' || !isFinite(value)) {
+        return 1;
+    }
+    return Math.min(SPEED_MAX, Math.max(SPEED_MIN, value));
+}
+
+function getSpeed(): number {
+    return clampSpeed(vscode.workspace.getConfiguration('piper-tts').get<number>('speed') ?? 1);
+}
+
+function showSpeedIndicator(speed: number): void {
+    if (!speedStatusBarItem) {
+        return;
+    }
+    speedStatusBarItem.text = `$(megaphone) Piper ${speed}×`;
+    speedStatusBarItem.tooltip = 'Piper TTS playback speed';
+    speedStatusBarItem.show();
+    if (speedIndicatorTimer) {
+        clearTimeout(speedIndicatorTimer);
+    }
+    speedIndicatorTimer = setTimeout(() => speedStatusBarItem?.hide(), 3000);
+}
+
+// Preset speeds offered in the right-click "Reading Speed" submenu.
+const SPEED_PRESETS = [0.5, 0.75, 1, 1.25, 1.5, 1.75, 2, 2.5, 3];
+
+// Turns a preset value into a stable command id suffix, e.g. 0.5 -> "0_5", 1 -> "1".
+function speedCommandId(value: number): string {
+    return `piper-tts.setSpeed_${String(value).replace('.', '_')}`;
+}
+
+// Set the playback speed to `next` (clamped). The value is persisted to user settings
+// (remembered across sessions) and shown in the status bar. If something is currently
+// playing, the remaining text is re-synthesized at the new speed so the change takes
+// effect immediately.
+async function applySpeed(next: number): Promise<void> {
+    const current = getSpeed();
+    next = clampSpeed(next);
+
+    // Work out the not-yet-spoken text before we change the setting, using the old
+    // speed to estimate how far playback has reached.
+    let remaining: string | undefined;
+    if (currentContext && currentUtterance && playerProcess && next !== current) {
+        const utterance = currentUtterance;
+        const elapsedSeconds = (Date.now() - utterance.startTime) / 1000;
+        const spokenChars = Math.floor(elapsedSeconds * BASE_CHARS_PER_SEC * current);
+        let offset = Math.min(utterance.text.length, Math.max(0, spokenChars));
+        // Snap forward to a word boundary so we don't restart mid-word.
+        const nextSpace = utterance.text.indexOf(' ', offset);
+        if (nextSpace !== -1) {
+            offset = nextSpace + 1;
+        }
+        const rest = utterance.text.slice(offset);
+        if (rest.trim()) {
+            remaining = rest;
+        }
+    }
+
+    await vscode.workspace.getConfiguration('piper-tts').update('speed', next, vscode.ConfigurationTarget.Global);
+    showSpeedIndicator(next);
+
+    if (remaining !== undefined && currentContext) {
+        synthesizeAndPlay(currentContext, remaining).catch(error => console.error('Failed to restart playback at new speed:', error));
+    }
+}
+
+// Adjust the configured speed by `delta`, snapping to the step grid so values stay
+// clean (…, 0.75, 1, 1.25, …) and clamped to [SPEED_MIN, SPEED_MAX].
+async function adjustSpeed(delta: number): Promise<void> {
+    await applySpeed(Math.round((getSpeed() + delta) / SPEED_STEP) * SPEED_STEP);
+}
+
 function getAvailableVoices(context: vscode.ExtensionContext): string[] {
     const parentDir = path.resolve(context.extensionUri.fsPath, '');
     const voicesDir = path.join(parentDir, 'voices');
@@ -418,6 +510,122 @@ async function removeVoice(context: vscode.ExtensionContext) {
     }
 }
 
+// Synthesize `text` with Piper at the current speed and stream it to the audio
+// player. Tracks the utterance so the speed can be changed mid-playback (see
+// adjustSpeed). Resolves when playback finishes (or is stopped/superseded).
+async function synthesizeAndPlay(context: vscode.ExtensionContext, text: string): Promise<void> {
+    try {
+        if (!text) {
+            throw new Error('No text provided');
+        }
+
+        // Stop any current playback
+        stopCurrentPlayback();
+
+        // Small delay to ensure any file operations are complete
+        await new Promise(resolve => setTimeout(resolve, 100));
+
+        const piperPath = getPiperPath(context);
+        const voicePath = getVoicePath(context);
+
+        // Verify file existence
+        if (!fs.existsSync(piperPath)) {
+            throw new Error(`Piper executable not found at: ${piperPath}`);
+        }
+        if (!fs.existsSync(voicePath)) {
+            throw new Error(`Voice model not found at: ${voicePath}`);
+        }
+
+        // Verify the voice file is accessible and not locked
+        try {
+            // Try to open the file to verify it's not locked
+            const fd = fs.openSync(voicePath, 'r');
+            fs.closeSync(fd);
+        } catch (err) {
+            const errorMessage = err instanceof Error ? err.message : String(err);
+            throw new Error(`Voice model file is not accessible: ${errorMessage}`);
+        }
+
+        const playback = getPlaybackCommand(context);
+
+        // Map the speed multiplier to Piper's --length_scale (inverse: a higher
+        // speed means shorter phonemes, i.e. a smaller length scale).
+        const lengthScale = (1 / getSpeed()).toFixed(3);
+
+        // Create piper process with full path
+        const piper = spawn(piperPath, ['--model', voicePath, '--output-raw', '--length_scale', lengthScale], {
+            cwd: path.dirname(piperPath),
+            env: { ...process.env },
+            windowsHide: false
+        });
+        piperProcess = piper;
+
+        // Create playback process
+        const player = spawn(playback.command, playback.args);
+        playerProcess = player;
+
+        // Track this utterance so a speed change can resume the remainder in real time.
+        const token = {};
+        currentUtterance = { text, startTime: Date.now(), token };
+
+        piper.stderr.on('data', (data) => {
+            console.error('Piper error output:', data.toString());
+        });
+
+        player.stderr.on('data', (data) => {
+            console.error('Player error output:', data.toString());
+        });
+
+        // Pipe the text through piper and to the playback command
+        piper.stdout.pipe(player.stdin);
+        piper.stdin.write(text);
+        piper.stdin.end();
+
+        // Return a promise that resolves when playback is complete
+        return await new Promise<void>((resolve, reject) => {
+            piper.on('error', (error) => {
+                console.error('Piper error:', error);
+                reject(error);
+            });
+
+            player.on('error', (error) => {
+                console.error('Playback error:', error);
+                reject(error);
+            });
+
+            // Clean up processes
+            piper.on('close', (code) => {
+                piperProcess = undefined;
+                // Only reject if the process wasn't killed intentionally
+                if (code !== 0 && code !== null) {
+                    reject(new Error(`Piper process exited with code: ${code}`));
+                } else {
+                    resolve();
+                }
+            });
+
+            player.on('close', (code) => {
+                playerProcess = undefined;
+                // Clear the tracked utterance only if it is still this one (a speed
+                // change starts a new utterance and supersedes the old one).
+                if (currentUtterance && currentUtterance.token === token) {
+                    currentUtterance = undefined;
+                }
+                // code === null means the process was killed intentionally (stop, or a
+                // speed change restarting playback) — treat that as a normal end.
+                if (code === 0 || code === null) {
+                    resolve();
+                } else {
+                    reject(new Error(`Player process exited with code: ${code}`));
+                }
+            });
+        });
+    } catch (error) {
+        console.error('Error:', error);
+        throw error;
+    }
+}
+
 // API interface that will be exposed to other extensions
 export interface PiperTTSApi {
     readText(text: string): Promise<void>;
@@ -472,115 +680,9 @@ export function activate(context: vscode.ExtensionContext): PiperTTSApi {
 
     // Create the API implementation
     const api: PiperTTSApi = {
-        readText: async (text: string) => {
-            try {
-                if (!text) {
-                    throw new Error('No text provided');
-                }
-
-                // Stop any current playback
-                stopCurrentPlayback();
-
-                // Small delay to ensure any file operations are complete
-                await new Promise(resolve => setTimeout(resolve, 100));
-
-                const piperPath = getPiperPath(context);
-                const voicePath = getVoicePath(context);
-
-                // Verify file existence
-                if (!fs.existsSync(piperPath)) {
-                    throw new Error(`Piper executable not found at: ${piperPath}`);
-                }
-                if (!fs.existsSync(voicePath)) {
-                    throw new Error(`Voice model not found at: ${voicePath}`);
-                }
-                
-                // Verify the voice file is accessible and not locked
-                try {
-                    // Try to open the file to verify it's not locked
-                    const fd = fs.openSync(voicePath, 'r');
-                    fs.closeSync(fd);
-                } catch (err) {
-                    const errorMessage = err instanceof Error ? err.message : String(err);
-                    throw new Error(`Voice model file is not accessible: ${errorMessage}`);
-                }
-
-                const playback = getPlaybackCommand(context);
-
-                // Create piper process with full path
-                const piper = spawn(piperPath, ['--model', voicePath, '--output-raw'], {
-                    cwd: path.dirname(piperPath),
-                    env: { ...process.env },
-                    windowsHide: false
-                });
-                piperProcess = piper;
-
-                // Create playback process
-                const player = spawn(playback.command, playback.args);
-                playerProcess = player;
-
-                // Handle process output for debugging
-                piper.stdout.on('data', (data) => {
-                    console.log('Piper output:', data.toString());
-                });
-
-                piper.stderr.on('data', (data) => {
-                    console.error('Piper error output:', data.toString());
-                });
-
-                player.stdout.on('data', (data) => {
-                    console.log('Player output:', data.toString());
-                });
-
-                player.stderr.on('data', (data) => {
-                    console.error('Player error output:', data.toString());
-                });
-
-                // Pipe the text through piper and to the playback command
-                piper.stdout.pipe(player.stdin);
-                piper.stdin.write(text);
-                piper.stdin.end();
-
-                // Return a promise that resolves when playback is complete
-                return new Promise((resolve, reject) => {
-                    piper.on('error', (error) => {
-                        console.error('Piper error:', error);
-                        reject(error);
-                    });
-
-                    player.on('error', (error) => {
-                        console.error('Playback error:', error);
-                        reject(error);
-                    });
-
-                    // Clean up processes
-                    piper.on('close', (code) => {
-                        console.log('Piper process exited with code:', code);
-                        piperProcess = undefined;
-                        // Only reject if the process wasn't killed intentionally
-                        if (code !== 0 && code !== null) {
-                            reject(new Error(`Piper process exited with code: ${code}`));
-                        } else {
-                            resolve();
-                        }
-                    });
-
-                    player.on('close', (code) => {
-                        console.log('Player process exited with code:', code);
-                        playerProcess = undefined;
-                        if (code === 0) {
-                            resolve();
-                        } else {
-                            reject(new Error(`Player process exited with code: ${code}`));
-                        }
-                    });
-                });
-            } catch (error) {
-                console.error('Error:', error);
-                throw error;
-            }
-        },
+        readText: (text: string) => synthesizeAndPlay(context, text),
         stopPlayback: () => {
+            currentUtterance = undefined;
             stopCurrentPlayback();
         },
         selectVoice: () => selectVoice(context),
@@ -622,6 +724,23 @@ export function activate(context: vscode.ExtensionContext): PiperTTSApi {
 
     const removeVoiceDisposable = vscode.commands.registerCommand('piper-tts.removeVoice', () => api.removeVoice());
     context.subscriptions.push(removeVoiceDisposable);
+
+    // Speed controls: adjust the playback speed multiplier. If something is playing,
+    // the change is applied in real time (the remainder is re-synthesized).
+    currentContext = context;
+    speedStatusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
+    context.subscriptions.push(
+        speedStatusBarItem,
+        vscode.commands.registerCommand('piper-tts.increaseSpeed', () => adjustSpeed(SPEED_STEP)),
+        vscode.commands.registerCommand('piper-tts.decreaseSpeed', () => adjustSpeed(-SPEED_STEP))
+    );
+
+    // Preset speeds for the right-click "Reading Speed" submenu.
+    for (const preset of SPEED_PRESETS) {
+        context.subscriptions.push(
+            vscode.commands.registerCommand(speedCommandId(preset), () => applySpeed(preset))
+        );
+    }
 
     // Store the API in our module-level variable so it can be accessed by getApi
     extensionApi = api;

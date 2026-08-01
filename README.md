@@ -5,6 +5,7 @@ A Visual Studio Code extension that adds high-quality local text-to-speech capab
 ## Features
 
 - **Read Selected Text Aloud**: Easily convert selected text to speech with a single command
+- **Adjustable Speed**: Speed up or slow down playback from the settings or with `Alt+]` / `Alt+[`
 - **Multiple Languages and Voices**: Support for 40+ languages with 100+ voice options
 - **Local Processing**: All text-to-speech processing happens locally on your machine, with no data sent to external servers
 - **Cross-Platform**: Works on Windows and Linux
@@ -30,6 +31,20 @@ A Visual Studio Code extension that adds high-quality local text-to-speech capab
 
 - Right-click in the editor and select "Stop Reading", or:
 - Open the Command Palette and run "Piper TTS: Stop Reading"
+
+### Adjusting Speed
+
+Set the playback speed with the `piper-tts.speed` setting (1 = normal, higher =
+faster, lower = slower), or adjust it on the fly:
+
+- Press `Alt+]` to speak faster, or `Alt+[` to speak slower
+- Or pick a preset from the **Reading Speed** submenu in the editor right-click menu
+- Or run "Piper TTS: Increase Speed" / "Piper TTS: Decrease Speed" from the Command Palette
+
+The new speed is shown briefly in the status bar. If something is already playing, the
+change takes effect immediately — the rest of the current text is re-spoken at the new
+speed. The setting is remembered across sessions. Speed is clamped to the 0.5–3.0 range
+in 0.25 steps.
 
 ### Changing Voices
 
@@ -96,6 +111,7 @@ Other VS Code extensions can use Piper TTS functionality by accessing its API. S
 ## Extension Settings
 
 - `piper-tts.voice`: The voice model to use for text-to-speech
+- `piper-tts.speed`: Playback speed multiplier (1 = normal, higher = faster, lower = slower)
 
 ## Known Issues
 
