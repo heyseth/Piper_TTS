@@ -20,6 +20,7 @@
   "activationEvents": [
     "onCommand:piper-tts.readAloud",
     "onCommand:piper-tts.readAloudPreview",
+    "onCommand:piper-tts.readAloudClipboard",
     "onCommand:piper-tts.stopPlayback",
     "onCommand:piper-tts.selectVoice",
     "onCommand:piper-tts.downloadVoice",
@@ -52,6 +53,11 @@
       {
         "command": "piper-tts.readAloudPreview",
         "title": "Read Aloud Selection (Markdown Preview)",
+        "category": "Piper TTS"
+      },
+      {
+        "command": "piper-tts.readAloudClipboard",
+        "title": "Read Aloud (Clipboard)",
         "category": "Piper TTS"
       },
       {
@@ -94,7 +100,10 @@
         },
         {
           "command": "piper-tts.readAloudPreview",
-          "when": "activeCustomEditorId == 'vscode.markdown.preview.editor' || activeWebviewPanelId == 'vscode.markdown.preview.editor' || markdownPreviewFocus"
+          "when": "activeWebviewPanelId == 'markdown.preview' || activeCustomEditorId == 'vscode.markdown.preview.editor'"
+        },
+        {
+          "command": "piper-tts.readAloudClipboard"
         },
         {
           "command": "piper-tts.stopPlayback"
@@ -119,12 +128,16 @@
       {
         "command": "piper-tts.readAloudPreview",
         "key": "alt+a",
-        "when": "activeCustomEditorId == 'vscode.markdown.preview.editor' || activeWebviewPanelId == 'vscode.markdown.preview.editor' || markdownPreviewFocus"
+        "when": "activeWebviewPanelId == 'markdown.preview' || activeCustomEditorId == 'vscode.markdown.preview.editor'"
+      },
+      {
+        "command": "piper-tts.readAloudClipboard",
+        "key": "ctrl+alt+a"
       },
       {
         "command": "piper-tts.stopPlayback",
         "key": "alt+shift+a",
-        "when": "editorTextFocus || markdownPreviewFocus"
+        "when": "editorTextFocus || activeWebviewPanelId == 'markdown.preview' || activeCustomEditorId == 'vscode.markdown.preview.editor'"
       }
     ],
     "markdown.previewScripts": [

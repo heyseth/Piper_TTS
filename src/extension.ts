@@ -648,6 +648,32 @@ export function activate(context: vscode.ExtensionContext): PiperTTSApi {
     });
     context.subscriptions.push(readAloudPreviewDisposable);
 
+    // Read whatever is currently on the clipboard. This is the universal entry point for
+    // content that lives in another extension's webview (Claude, Cline, Codex chat, etc.):
+    // those webviews are sandboxed so we can't read their DOM, but the user can select
+    // text there, copy it, and trigger this command (Ctrl+Alt+A) to have it read aloud.
+    const readAloudClipboardDisposable = vscode.commands.registerCommand('piper-tts.readAloudClipboard', async () => {
+        let text = '';
+        try {
+            text = (await vscode.env.clipboard.readText()) || '';
+        } catch (error) {
+            console.error('Failed to read clipboard for read-aloud:', error);
+        }
+        text = text.trim();
+
+        if (!text) {
+            vscode.window.showInformationMessage('Clipboard is empty — copy some text first, then run Read Aloud (Clipboard).');
+            return;
+        }
+
+        try {
+            await api.readText(text);
+        } catch (error) {
+            vscode.window.showErrorMessage('Error running text-to-speech: ' + (error instanceof Error ? error.message : String(error)));
+        }
+    });
+    context.subscriptions.push(readAloudClipboardDisposable);
+
     const stopDisposable = vscode.commands.registerCommand('piper-tts.stopPlayback', () => api.stopPlayback());
     context.subscriptions.push(stopDisposable);
 

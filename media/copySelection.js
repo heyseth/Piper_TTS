@@ -88,7 +88,7 @@
     readClipboard().then(function (previous) {
       writeClipboard(payload).then(function () {
         if (payload) {
-          showToast('🔊 Reading selection…');
+          showToast('🔊 Reading selection… (Alt+Shift+A to stop)');
         } else {
           showToast('Select some text first');
         }
@@ -109,7 +109,7 @@
         // Clipboard write failed (permissions). Fall back to a copy of the DOM
         // selection, which is allowed inside the keydown user gesture.
         try { document.execCommand('copy'); } catch (e) { /* ignore */ }
-        showToast(payload ? '🔊 Reading selection…' : 'Select some text first');
+        showToast(payload ? '🔊 Reading selection… (Alt+Shift+A to stop)' : 'Select some text first');
       });
     });
   }
