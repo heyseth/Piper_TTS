@@ -254,12 +254,12 @@
       {
         "command": "piper-tts.increaseSpeed",
         "key": "alt+]",
-        "when": "editorTextFocus || markdownPreviewFocus || activeCustomEditorId == 'vscode.markdown.preview.editor' || activeWebviewPanelId == 'vscode.markdown.preview.editor'"
+        "when": "editorTextFocus || activeWebviewPanelId == 'markdown.preview' || activeCustomEditorId == 'vscode.markdown.preview.editor'"
       },
       {
         "command": "piper-tts.decreaseSpeed",
         "key": "alt+[",
-        "when": "editorTextFocus || markdownPreviewFocus || activeCustomEditorId == 'vscode.markdown.preview.editor' || activeWebviewPanelId == 'vscode.markdown.preview.editor'"
+        "when": "editorTextFocus || activeWebviewPanelId == 'markdown.preview' || activeCustomEditorId == 'vscode.markdown.preview.editor'"
       }
     ],
     "submenus": [

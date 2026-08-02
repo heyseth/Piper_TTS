@@ -43,10 +43,11 @@ faster, lower = slower), or adjust it on the fly:
 
 The new speed is shown briefly in the status bar, is remembered across sessions, and is
 clamped to the 0.5–3.0 range in 0.25 steps. If something is already playing, the change
-takes effect immediately. On Windows this is gapless — the already-synthesized audio is
-re-timed with a pitch-preserving tempo effect rather than regenerated — so you can scrub
-the speed up and down while listening. (On other platforms the remaining text is
-re-synthesized at the new speed.)
+takes effect immediately. Where a tempo-capable player is available (Windows via the
+bundled sox, Linux via `ffplay`) the already-synthesized audio is re-timed with a
+pitch-preserving tempo effect rather than regenerated — this is low-latency (a brief gap
+from restarting the player, not truly gapless). On other platforms the remaining text is
+re-synthesized at the new speed.
 
 ### Changing Voices
 

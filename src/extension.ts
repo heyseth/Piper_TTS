@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import * as os from 'os';
 import * as path from 'path';
-import { spawn } from 'child_process';
+import { spawn, spawnSync } from 'child_process';
 import * as fs from 'fs';
 import * as https from 'https';
 import * as http from 'http';
@@ -71,9 +71,11 @@ function speedCommandId(value: number): string {
 // Set the playback speed to `next` (clamped). The value is persisted to user settings
 // (remembered across sessions) and shown in the status bar. If something is currently
 // playing, the change takes effect immediately:
-//   - On Windows (seamless mode) the player is restarted from the current position with
-//     a new sox `tempo` — no Piper reload, so it is effectively gapless.
-//   - Elsewhere the remaining text is re-synthesized at the new speed.
+//   - With a tempo-capable player (Windows via sox, Linux via ffplay) the player is
+//     restarted from the current position at the new tempo, avoiding a Piper reload.
+//     Restarting the player still costs a brief (~150ms) gap — this is low-latency,
+//     not truly gapless.
+//   - Otherwise the remaining text is re-synthesized at the new speed (a larger gap).
 async function applySpeed(next: number): Promise<void> {
     const current = getSpeed();
     next = clampSpeed(next);
@@ -83,12 +85,12 @@ async function applySpeed(next: number): Promise<void> {
     showSpeedIndicator(next);
     if (next === current) { return; }
 
-    // Windows: apply seamlessly (or re-synthesize the remainder if still synthesizing).
+    // Fast path (tempo-capable player): restart it at the new tempo without a Piper reload.
     if (seamlessSpeedChange(next)) { return; }
 
-    // Other platforms: re-synthesize the not-yet-spoken text (estimated from the old
-    // speed) at the new speed so the change takes effect immediately.
-    if (!IS_WINDOWS && currentContext && currentUtterance && playerProcess) {
+    // No tempo-capable player (mac, or Linux without ffplay): re-synthesize the not-yet-spoken
+    // text (estimated from the old speed) at the new speed so the change takes effect.
+    if (!SEAMLESS_ENABLED && currentContext && currentUtterance && playerProcess) {
         const utterance = currentUtterance;
         const elapsedSeconds = (Date.now() - utterance.startTime) / 1000;
         const spokenChars = Math.floor(elapsedSeconds * BASE_CHARS_PER_SEC * current);
@@ -111,18 +113,56 @@ async function adjustSpeed(delta: number): Promise<void> {
     await applySpeed(Math.round((getSpeed() + delta) / SPEED_STEP) * SPEED_STEP);
 }
 
-// ---- Seamless speed (Windows) ----
+// ---- Low-latency speed changes ----
 // Piper reloads its model on every spawn (a multi-second cost), so re-synthesizing on
-// each speed change is never gapless. On Windows the bundled sox `play.exe` supports the
-// pitch-preserving `tempo` effect and `trim`. So we stream Piper's output to the player
-// (for an instant start) while also teeing the raw audio to a file; once that file is
-// complete, a speed change restarts only the player from the current offset with a new
-// tempo — gapless, no Piper reload. If the speed is changed before synthesis finishes,
-// we fall back to re-synthesizing the remainder (the previous behaviour). Other platforms
-// (aplay/afplay) lack these effects and always use the re-synthesis path.
+// each speed change is slow. A tempo-capable player avoids that: on Windows the bundled
+// sox `play.exe` supports the pitch-preserving `tempo` effect and `trim`. So we stream
+// Piper's output to the player (for an instant start) while also teeing the raw audio to
+// a file; once that file is complete, a speed change restarts only the player from the
+// current offset at the new tempo — no Piper reload. Restarting the player process still
+// costs a brief (~150ms) gap, so this is low-latency, not truly gapless. If the speed is
+// changed before synthesis finishes, we fall back to re-synthesizing the remainder. macOS
+// (afplay) lacks these effects and always uses the re-synthesis path.
 const IS_WINDOWS = os.platform() === 'win32';
+const IS_LINUX = os.platform() === 'linux';
 const RAW_SAMPLE_RATE = 22050;
 const RAW_BYTES_PER_SEC = RAW_SAMPLE_RATE * 2; // 16-bit mono
+
+// ffplay (shipped with ffmpeg) supports pitch-preserving tempo (the `atempo` filter)
+// and seeking, so on Linux we use the same buffered, file-based playback as Windows
+// instead of streaming straight to aplay. This is the key fix for choppy playback:
+// aplay stutters when Piper's pipe stalls between sentences, whereas buffered file
+// playback is smooth. Detected once; if ffplay is missing we fall back to the old
+// aplay streaming path.
+let _hasFfplayCache: boolean | undefined;
+function hasFfplay(): boolean {
+    if (_hasFfplayCache === undefined) {
+        try {
+            const r = spawnSync('ffplay', ['-version'], { stdio: 'ignore' });
+            _hasFfplayCache = !r.error && r.status === 0;
+        } catch {
+            _hasFfplayCache = false;
+        }
+    }
+    return _hasFfplayCache;
+}
+
+// Buffered playback (smooth, with low-latency speed changes) is available on Windows
+// (bundled sox) and on Linux when ffplay is present. Everything else uses the direct
+// streaming path.
+const SEAMLESS_ENABLED = IS_WINDOWS || (IS_LINUX && hasFfplay());
+
+// Build an ffmpeg `atempo` filter chain for an arbitrary tempo. A single atempo stage
+// only covers 0.5..2.0, so values outside that are split across stages (e.g. 3.0 ->
+// "atempo=2.0,atempo=1.5", 0.4 -> "atempo=0.5,atempo=0.8").
+function buildAtempoArgs(tempo: number): string {
+    let remaining = tempo;
+    const parts: string[] = [];
+    while (remaining > 2.0 + 1e-9) { parts.push('atempo=2.0'); remaining /= 2.0; }
+    while (remaining < 0.5 - 1e-9) { parts.push('atempo=0.5'); remaining /= 0.5; }
+    parts.push('atempo=' + remaining.toFixed(6));
+    return parts.join(',');
+}
 
 let currentPlayback: {
     token: object;
@@ -157,23 +197,41 @@ function soxPlayPath(context: vscode.ExtensionContext): string {
 }
 
 // Player that reads a completed raw file, seeking to `offsetSec` and applying `tempo`.
-function spawnSoxFilePlayer(context: vscode.ExtensionContext, file: string, offsetSec: number, tempo: number) {
-    return spawn(soxPlayPath(context), [
-        '-t', 'raw', '-r', String(RAW_SAMPLE_RATE), '-b', '16', '-e', 'signed', '-c', '1', '-L',
-        file,
-        'trim', Math.max(0, offsetSec).toFixed(3),
-        'tempo', tempo.toFixed(3),
-        'remix', '1'
+// Windows uses the bundled sox; elsewhere (Linux) uses ffplay's atempo filter + seek.
+function spawnFilePlayer(context: vscode.ExtensionContext, file: string, offsetSec: number, tempo: number) {
+    if (IS_WINDOWS) {
+        return spawn(soxPlayPath(context), [
+            '-t', 'raw', '-r', String(RAW_SAMPLE_RATE), '-b', '16', '-e', 'signed', '-c', '1', '-L',
+            file,
+            'trim', Math.max(0, offsetSec).toFixed(3),
+            'tempo', tempo.toFixed(3),
+            'remix', '1'
+        ]);
+    }
+    return spawn('ffplay', [
+        '-hide_banner', '-loglevel', 'error', '-nodisp', '-autoexit',
+        '-f', 's16le', '-ar', String(RAW_SAMPLE_RATE), '-ac', '1',
+        '-ss', Math.max(0, offsetSec).toFixed(3),
+        '-i', file,
+        '-af', buildAtempoArgs(tempo)
     ]);
 }
 
 // Player that reads raw audio from stdin (streamed from Piper) applying `tempo`.
-function spawnSoxStreamPlayer(context: vscode.ExtensionContext, tempo: number) {
-    return spawn(soxPlayPath(context), [
-        '-t', 'raw', '-r', String(RAW_SAMPLE_RATE), '-b', '16', '-e', 'signed', '-c', '1', '-L',
-        '-',
-        'tempo', tempo.toFixed(3),
-        'remix', '1'
+function spawnStreamPlayer(context: vscode.ExtensionContext, tempo: number) {
+    if (IS_WINDOWS) {
+        return spawn(soxPlayPath(context), [
+            '-t', 'raw', '-r', String(RAW_SAMPLE_RATE), '-b', '16', '-e', 'signed', '-c', '1', '-L',
+            '-',
+            'tempo', tempo.toFixed(3),
+            'remix', '1'
+        ]);
+    }
+    return spawn('ffplay', [
+        '-hide_banner', '-loglevel', 'error', '-nodisp', '-autoexit',
+        '-f', 's16le', '-ar', String(RAW_SAMPLE_RATE), '-ac', '1',
+        '-af', buildAtempoArgs(tempo),
+        '-i', 'pipe:0'
     ]);
 }
 
@@ -188,7 +246,9 @@ function attachSeamlessHandlers(player: ReturnType<typeof spawn>, token: object,
             playerProcess = undefined;
         }
         finalizeSeamless(token);
-        if (code === 0 || code === null) {
+        // code === null (killed by signal) or player.killed means an intentional stop
+        // / speed-change restart — treat as a clean end, not an error.
+        if (code === 0 || code === null || player.killed) {
             if (resolve) { resolve(); }
         } else if (reject) {
             reject(new Error(`Player process exited with code: ${code}`));
@@ -196,8 +256,8 @@ function attachSeamlessHandlers(player: ReturnType<typeof spawn>, token: object,
     });
 }
 
-// Windows seamless playback: stream Piper -> player for an instant start, while teeing
-// the raw audio to a temp file so later speed changes can re-time it without re-synth.
+// Buffered playback (Windows + Linux): stream Piper -> player for an instant start, while
+// teeing the raw audio to a temp file so later speed changes can re-time it without re-synth.
 async function synthesizeAndPlaySeamless(context: vscode.ExtensionContext, text: string): Promise<void> {
     if (!text) { throw new Error('No text provided'); }
 
@@ -222,7 +282,7 @@ async function synthesizeAndPlaySeamless(context: vscode.ExtensionContext, text:
         windowsHide: false
     });
     piperProcess = piper;
-    const player = spawnSoxStreamPlayer(context, tempo);
+    const player = spawnStreamPlayer(context, tempo);
     playerProcess = player;
 
     const out = fs.createWriteStream(file);
@@ -254,12 +314,13 @@ async function synthesizeAndPlaySeamless(context: vscode.ExtensionContext, text:
 // Apply a speed change to the current (Windows) playback. Returns true if it handled the
 // change. Config must already be updated to `next` (a re-synth reads it via getSpeed()).
 function seamlessSpeedChange(next: number): boolean {
-    if (!IS_WINDOWS || !currentContext || !currentPlayback || !playerProcess) { return false; }
+    if (!SEAMLESS_ENABLED || !currentContext || !currentPlayback || !playerProcess) { return false; }
     const pb = currentPlayback;
     const elapsedSeconds = (Date.now() - pb.startWall) / 1000;
 
     if (pb.synthComplete) {
-        // Gapless: restart only the player from the current offset with the new tempo.
+        // Low-latency: restart only the player from the current offset at the new tempo
+        // (brief ~150ms gap from the player restart, but no Piper reload / re-synth).
         const offset = pb.originOffsetSec + elapsedSeconds * pb.tempo;
         if (offset >= pb.durationSec - 0.05) { return false; } // practically finished
         const token = {};
@@ -267,7 +328,7 @@ function seamlessSpeedChange(next: number): boolean {
         // (fired by stopCurrentPlayback below) does not delete the shared temp file.
         currentPlayback = { ...pb, token, originOffsetSec: Math.max(0, offset), startWall: Date.now(), tempo: next };
         stopCurrentPlayback(); // kills the player only; the temp file is reused
-        const player = spawnSoxFilePlayer(currentContext, pb.file, Math.max(0, offset), next);
+        const player = spawnFilePlayer(currentContext, pb.file, Math.max(0, offset), next);
         playerProcess = player;
         setPlayingContext(true);
         attachSeamlessHandlers(player, token);
@@ -818,9 +879,11 @@ async function synthesizeAndPlay(context: vscode.ExtensionContext, text: string,
                 // Clear the tracked utterance only if it is still this one (a speed
                 // change starts a new utterance and supersedes the old one).
                 finalizeIfCurrent();
-                // code === null means the process was killed intentionally (stop, or a
-                // speed change restarting playback) — treat that as a normal end.
-                if (code === 0 || code === null) {
+                // code === null (killed by signal) or player.killed means the process was
+                // stopped intentionally (stop, or a speed change restarting playback).
+                // aplay also exits non-zero when SIGTERM'd, so treat a killed player as a
+                // normal end rather than surfacing a spurious error.
+                if (code === 0 || code === null || player.killed) {
                     resolve();
                 } else {
                     reject(new Error(`Player process exited with code: ${code}`));
@@ -887,7 +950,7 @@ export function activate(context: vscode.ExtensionContext): PiperTTSApi {
 
     // Create the API implementation
     const api: PiperTTSApi = {
-        readText: (text: string) => IS_WINDOWS ? synthesizeAndPlaySeamless(context, text) : synthesizeAndPlay(context, text),
+        readText: (text: string) => SEAMLESS_ENABLED ? synthesizeAndPlaySeamless(context, text) : synthesizeAndPlay(context, text),
         stopPlayback: () => {
             currentUtterance = undefined;
             cleanupPlaybackFile();
