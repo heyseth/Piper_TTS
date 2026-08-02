@@ -614,6 +614,66 @@ export function activate(context: vscode.ExtensionContext): PiperTTSApi {
     });
     context.subscriptions.push(readAloudDisposable);
 
+    // Read the current selection in the built-in Markdown preview.
+    //
+    // The preview is a VS Code-owned webview and extensions can't read its DOM or
+    // receive messages from contributed preview scripts (see microsoft/vscode#174080).
+    // Our contributed script (media/copySelection.js) copies the preview selection
+    // to the clipboard when Alt+A is pressed; this command — bound to the same Alt+A
+    // while the preview is focused — reads it back and speaks it. The preview script
+    // writes an empty string when nothing is selected so we can distinguish that from
+    // a stale clipboard, and restores the previous clipboard contents afterwards.
+    const readAloudPreviewDisposable = vscode.commands.registerCommand('piper-tts.readAloudPreview', async () => {
+        // Give the preview script a brief moment to place the selection on the clipboard.
+        await new Promise(resolve => setTimeout(resolve, 60));
+
+        let text = '';
+        try {
+            text = (await vscode.env.clipboard.readText()) || '';
+        } catch (error) {
+            console.error('Failed to read clipboard for preview read-aloud:', error);
+        }
+        text = text.trim();
+
+        if (!text) {
+            vscode.window.showInformationMessage('Select some text in the Markdown preview, then press Alt+A to read it aloud.');
+            return;
+        }
+
+        try {
+            await api.readText(text);
+        } catch (error) {
+            vscode.window.showErrorMessage('Error running text-to-speech: ' + (error instanceof Error ? error.message : String(error)));
+        }
+    });
+    context.subscriptions.push(readAloudPreviewDisposable);
+
+    // Read whatever is currently on the clipboard. This is the universal entry point for
+    // content that lives in another extension's webview (Claude, Cline, Codex chat, etc.):
+    // those webviews are sandboxed so we can't read their DOM, but the user can select
+    // text there, copy it, and trigger this command (Ctrl+Alt+A) to have it read aloud.
+    const readAloudClipboardDisposable = vscode.commands.registerCommand('piper-tts.readAloudClipboard', async () => {
+        let text = '';
+        try {
+            text = (await vscode.env.clipboard.readText()) || '';
+        } catch (error) {
+            console.error('Failed to read clipboard for read-aloud:', error);
+        }
+        text = text.trim();
+
+        if (!text) {
+            vscode.window.showInformationMessage('Clipboard is empty — copy some text first, then run Read Aloud (Clipboard).');
+            return;
+        }
+
+        try {
+            await api.readText(text);
+        } catch (error) {
+            vscode.window.showErrorMessage('Error running text-to-speech: ' + (error instanceof Error ? error.message : String(error)));
+        }
+    });
+    context.subscriptions.push(readAloudClipboardDisposable);
+
     const stopDisposable = vscode.commands.registerCommand('piper-tts.stopPlayback', () => api.stopPlayback());
     context.subscriptions.push(stopDisposable);
 

@@ -5,6 +5,8 @@ A Visual Studio Code extension that adds high-quality local text-to-speech capab
 ## Features
 
 - **Read Selected Text Aloud**: Easily convert selected text to speech with a single command
+- **Read from the Markdown Preview**: Select rendered text in the built-in Markdown preview and read it aloud with `Alt+A`
+- **Read from Other Extensions**: Copy text from any panel or webview (AI chats like Claude, Cline, Codex, etc.) and read the clipboard aloud with `Ctrl+Alt+A`
 - **Multiple Languages and Voices**: Support for 40+ languages with 100+ voice options
 - **Local Processing**: All text-to-speech processing happens locally on your machine, with no data sent to external servers
 - **Cross-Platform**: Works on Windows and Linux
@@ -24,11 +26,43 @@ A Visual Studio Code extension that adds high-quality local text-to-speech capab
 
 1. Select text in the editor
 2. Right-click and select "Read Aloud Text" from the context menu, or:
-3. Open the Command Palette (`Ctrl+Shift+P` / `Cmd+Shift+P`) and run "Piper TTS: Read Aloud Text"
+3. Press `Alt+A`, or:
+4. Open the Command Palette (`Ctrl+Shift+P` / `Cmd+Shift+P`) and run "Piper TTS: Read Aloud Text"
+
+### Reading Text in the Markdown Preview
+
+The built-in Markdown preview is a webview that VS Code owns, so extensions cannot
+add items to its right-click menu or read its selection directly. Piper TTS bridges
+this with a keyboard shortcut:
+
+1. Open a Markdown preview (`Ctrl+Shift+V`) and click into the preview pane
+2. Select the rendered text you want to hear
+3. Press `Alt+A`
+
+A small "🔊 Reading selection…" toast confirms the selection was picked up, and the
+text is read aloud. You can also run "Piper TTS: Read Aloud Selection (Markdown
+Preview)" from the Command Palette while the preview is focused.
+
+> Under the hood, a contributed preview script copies the current selection to the
+> clipboard when `Alt+A` is pressed and restores your previous clipboard contents
+> immediately afterwards. This is a workaround for the lack of a messaging channel
+> between extensions and the Markdown preview
+> ([microsoft/vscode#174080](https://github.com/microsoft/vscode/issues/174080)).
+
+### Reading Text from Other Extensions
+
+The Markdown-preview limitation applies to other extensions' panels too — AI chats such as
+Claude, Cline, or Codex render their output in sandboxed webviews that Piper TTS cannot read
+directly. The workaround is the clipboard: select the text there, copy it, then read the
+clipboard aloud.
+
+1. Copy the text you want to hear (`Ctrl+C`)
+2. Press `Ctrl+Alt+A`, or run "Piper TTS: Read Aloud (Clipboard)" from the Command Palette
 
 ### Stopping Playback
 
 - Right-click in the editor and select "Stop Reading", or:
+- Press `Alt+Shift+A` (works in the editor and while the Markdown preview is focused), or:
 - Open the Command Palette and run "Piper TTS: Stop Reading"
 
 ### Changing Voices
