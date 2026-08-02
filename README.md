@@ -19,6 +19,23 @@ A Visual Studio Code extension that adds high-quality local text-to-speech capab
    - `en_US-hfc_female-medium` (default)
    - `en_US-hfc_male-medium`
 
+### Linux prerequisites
+
+Audio playback on Linux uses command-line players that are not bundled:
+
+- **`aplay`** (from `alsa-utils`) — required for playback.
+- **`ffplay`** (from `ffmpeg`) — recommended. It enables smooth buffered playback and
+  low-latency speed changes. Without it, playback falls back to streaming through
+  `aplay`, which can stutter between sentences.
+
+On Debian/Ubuntu:
+
+```bash
+sudo apt install alsa-utils ffmpeg
+```
+
+Windows and macOS need no extra setup (Windows uses the bundled sox player).
+
 ## Usage
 
 ### Reading Text Aloud
