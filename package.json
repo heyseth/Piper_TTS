@@ -19,6 +19,8 @@
   ],
   "activationEvents": [
     "onCommand:piper-tts.readAloud",
+    "onCommand:piper-tts.increaseSpeed",
+    "onCommand:piper-tts.decreaseSpeed",
     "onCommand:piper-tts.stopPlayback",
     "onCommand:piper-tts.selectVoice",
     "onCommand:piper-tts.downloadVoice",
@@ -39,6 +41,13 @@
           "type": "string",
           "default": "en_US-hfc_female-medium",
           "description": "Voice model to use for text-to-speech. Use the 'Piper TTS: Select Voice' command to change."
+        },
+        "piper-tts.speed": {
+          "type": "number",
+          "default": 1,
+          "minimum": 0.5,
+          "maximum": 3,
+          "description": "Playback speed for text-to-speech (1 = normal, higher = faster, lower = slower). Adjust on the fly with Alt+] (faster) and Alt+[ (slower)."
         }
       }
     },
@@ -67,6 +76,61 @@
         "command": "piper-tts.removeVoice",
         "title": "Remove Voice",
         "category": "Piper TTS"
+      },
+      {
+        "command": "piper-tts.increaseSpeed",
+        "title": "Increase Speed",
+        "category": "Piper TTS"
+      },
+      {
+        "command": "piper-tts.decreaseSpeed",
+        "title": "Decrease Speed",
+        "category": "Piper TTS"
+      },
+      {
+        "command": "piper-tts.setSpeed_0_5",
+        "title": "0.5×",
+        "category": "Piper TTS"
+      },
+      {
+        "command": "piper-tts.setSpeed_0_75",
+        "title": "0.75×",
+        "category": "Piper TTS"
+      },
+      {
+        "command": "piper-tts.setSpeed_1",
+        "title": "1× (Normal)",
+        "category": "Piper TTS"
+      },
+      {
+        "command": "piper-tts.setSpeed_1_25",
+        "title": "1.25×",
+        "category": "Piper TTS"
+      },
+      {
+        "command": "piper-tts.setSpeed_1_5",
+        "title": "1.5×",
+        "category": "Piper TTS"
+      },
+      {
+        "command": "piper-tts.setSpeed_1_75",
+        "title": "1.75×",
+        "category": "Piper TTS"
+      },
+      {
+        "command": "piper-tts.setSpeed_2",
+        "title": "2×",
+        "category": "Piper TTS"
+      },
+      {
+        "command": "piper-tts.setSpeed_2_5",
+        "title": "2.5×",
+        "category": "Piper TTS"
+      },
+      {
+        "command": "piper-tts.setSpeed_3",
+        "title": "3×",
+        "category": "Piper TTS"
       }
     ],
     "menus": {
@@ -78,6 +142,11 @@
         },
         {
           "command": "piper-tts.stopPlayback",
+          "group": "1_modification",
+          "when": "piper-tts.isPlaying"
+        },
+        {
+          "submenu": "piper-tts.speedSubmenu",
           "group": "1_modification"
         }
       ],
@@ -87,7 +156,8 @@
           "when": "editorHasSelection"
         },
         {
-          "command": "piper-tts.stopPlayback"
+          "command": "piper-tts.stopPlayback",
+          "when": "piper-tts.isPlaying"
         },
         {
           "command": "piper-tts.selectVoice"
@@ -97,9 +167,107 @@
         },
         {
           "command": "piper-tts.removeVoice"
+        },
+        {
+          "command": "piper-tts.increaseSpeed"
+        },
+        {
+          "command": "piper-tts.decreaseSpeed"
+        },
+        {
+          "command": "piper-tts.setSpeed_0_5",
+          "when": "false"
+        },
+        {
+          "command": "piper-tts.setSpeed_0_75",
+          "when": "false"
+        },
+        {
+          "command": "piper-tts.setSpeed_1",
+          "when": "false"
+        },
+        {
+          "command": "piper-tts.setSpeed_1_25",
+          "when": "false"
+        },
+        {
+          "command": "piper-tts.setSpeed_1_5",
+          "when": "false"
+        },
+        {
+          "command": "piper-tts.setSpeed_1_75",
+          "when": "false"
+        },
+        {
+          "command": "piper-tts.setSpeed_2",
+          "when": "false"
+        },
+        {
+          "command": "piper-tts.setSpeed_2_5",
+          "when": "false"
+        },
+        {
+          "command": "piper-tts.setSpeed_3",
+          "when": "false"
+        }
+      ],
+      "piper-tts.speedSubmenu": [
+        {
+          "command": "piper-tts.setSpeed_0_5",
+          "group": "speed@1"
+        },
+        {
+          "command": "piper-tts.setSpeed_0_75",
+          "group": "speed@2"
+        },
+        {
+          "command": "piper-tts.setSpeed_1",
+          "group": "speed@3"
+        },
+        {
+          "command": "piper-tts.setSpeed_1_25",
+          "group": "speed@4"
+        },
+        {
+          "command": "piper-tts.setSpeed_1_5",
+          "group": "speed@5"
+        },
+        {
+          "command": "piper-tts.setSpeed_1_75",
+          "group": "speed@6"
+        },
+        {
+          "command": "piper-tts.setSpeed_2",
+          "group": "speed@7"
+        },
+        {
+          "command": "piper-tts.setSpeed_2_5",
+          "group": "speed@8"
+        },
+        {
+          "command": "piper-tts.setSpeed_3",
+          "group": "speed@9"
         }
       ]
-    }
+    },
+    "keybindings": [
+      {
+        "command": "piper-tts.increaseSpeed",
+        "key": "alt+]",
+        "when": "editorTextFocus || activeWebviewPanelId == 'markdown.preview' || activeCustomEditorId == 'vscode.markdown.preview.editor'"
+      },
+      {
+        "command": "piper-tts.decreaseSpeed",
+        "key": "alt+[",
+        "when": "editorTextFocus || activeWebviewPanelId == 'markdown.preview' || activeCustomEditorId == 'vscode.markdown.preview.editor'"
+      }
+    ],
+    "submenus": [
+      {
+        "id": "piper-tts.speedSubmenu",
+        "label": "Reading Speed"
+      }
+    ]
   },
   "scripts": {
     "vscode:prepublish": "npm run compile",

@@ -5,6 +5,7 @@ A Visual Studio Code extension that adds high-quality local text-to-speech capab
 ## Features
 
 - **Read Selected Text Aloud**: Easily convert selected text to speech with a single command
+- **Adjustable Speed**: Speed up or slow down playback from the settings or with `Alt+]` / `Alt+[`
 - **Multiple Languages and Voices**: Support for 40+ languages with 100+ voice options
 - **Local Processing**: All text-to-speech processing happens locally on your machine, with no data sent to external servers
 - **Cross-Platform**: Works on Windows and Linux
@@ -18,6 +19,23 @@ A Visual Studio Code extension that adds high-quality local text-to-speech capab
    - `en_US-hfc_female-medium` (default)
    - `en_US-hfc_male-medium`
 
+### Linux prerequisites
+
+Audio playback on Linux uses command-line players that are not bundled:
+
+- **`aplay`** (from `alsa-utils`) — required for playback.
+- **`ffplay`** (from `ffmpeg`) — recommended. It enables smooth buffered playback and
+  low-latency speed changes. Without it, playback falls back to streaming through
+  `aplay`, which can stutter between sentences.
+
+On Debian/Ubuntu:
+
+```bash
+sudo apt install alsa-utils ffmpeg
+```
+
+Windows and macOS need no extra setup (Windows uses the bundled sox player).
+
 ## Usage
 
 ### Reading Text Aloud
@@ -30,6 +48,23 @@ A Visual Studio Code extension that adds high-quality local text-to-speech capab
 
 - Right-click in the editor and select "Stop Reading", or:
 - Open the Command Palette and run "Piper TTS: Stop Reading"
+
+### Adjusting Speed
+
+Set the playback speed with the `piper-tts.speed` setting (1 = normal, higher =
+faster, lower = slower), or adjust it on the fly:
+
+- Press `Alt+]` to speak faster, or `Alt+[` to speak slower
+- Or pick a preset from the **Reading Speed** submenu in the editor right-click menu
+- Or run "Piper TTS: Increase Speed" / "Piper TTS: Decrease Speed" from the Command Palette
+
+The new speed is shown briefly in the status bar, is remembered across sessions, and is
+clamped to the 0.5–3.0 range in 0.25 steps. If something is already playing, the change
+takes effect immediately. Where a tempo-capable player is available (Windows via the
+bundled sox, Linux via `ffplay`) the already-synthesized audio is re-timed with a
+pitch-preserving tempo effect rather than regenerated — this is low-latency (a brief gap
+from restarting the player, not truly gapless). On other platforms the remaining text is
+re-synthesized at the new speed.
 
 ### Changing Voices
 
@@ -96,6 +131,7 @@ Other VS Code extensions can use Piper TTS functionality by accessing its API. S
 ## Extension Settings
 
 - `piper-tts.voice`: The voice model to use for text-to-speech
+- `piper-tts.speed`: Playback speed multiplier (1 = normal, higher = faster, lower = slower)
 
 ## Known Issues
 
